@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wanderer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+  <style>
+    :root { --bg: #0b0f17; --panel: rgba(17, 24, 39, 0.85); --text: #e5e7eb; --muted: #9ca3af; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #map { position: absolute; inset: 0; background: var(--bg); }
+    .panel { position: absolute; z-index: 1000; background: var(--panel); backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 12px 14px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+    #hud { top: 14px; left: 14px; min-width: 200px; }
+    #hud h1 { margin: 0 0 2px; font-size: 18px; letter-spacing: 0.5px; }
+    #hud .sub { color: var(--muted); font-size: 12px; }
+    #stats { margin-top: 8px; font-size: 13px; }
+    #stats b { font-size: 20px; font-weight: 700; }
+    #bar { height: 4px; border-radius: 4px; background: rgba(255,255,255,0.1); margin-top: 8px; overflow: hidden; display: none; }
+    #bar > div { height: 100%; width: 0%; background: #38bdf8; transition: width 0.3s ease; }
+    #status { margin-top: 6px; font-size: 11px; color: var(--muted); min-height: 14px; }
+    .btn { margin-top: 8px; display: inline-block; cursor: pointer; font-size: 12px; color: var(--text);
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px;
+      padding: 6px 10px; user-select: none; }
+    .btn:hover { background: rgba(255,255,255,0.12); }
+    #legend { bottom: 14px; right: 14px; font-size: 12px; }
+    #legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    #legend .sw { width: 14px; height: 4px; border-radius: 2px; }
+    .leaflet-container { background: var(--bg); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="hud" class="panel">
+    <h1>Wanderer</h1>
+    <div class="sub">everywhere you've ever been</div>
+    <div id="stats"><b id="count">0</b> routes</div>
+    <div id="bar"><div></div></div>
+    <div id="status"></div>
+    <div class="btn" id="fit">Fit all routes</div>
+    <div class="btn" id="sf">Back to SF</div>
+  </div>
+
+  <div id="legend" class="panel"></div>
+
+  <script>
+    var SF = [37.7749, -122.4194];
+    var SF_ZOOM = 12;
+
+    var COLORS = {
+      running: "#f43f5e",
+      cycling: "#38bdf8",
+      walking: "#34d399",
+      hiking: "#f59e0b",
+      swimming: "#22d3ee",
+      snowboarding: "#c084fc",
+      downhill_skiing: "#c084fc",
+      other: "#a78bfa"
+    };
+    function colorFor(t) { return COLORS[t] || COLORS.other; }
+
+    var map = L.map("map", { zoomControl: true, preferCanvas: true }).setView(SF, SF_ZOOM);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19 }).addTo(map);
+
+    var routeLayer = L.layerGroup().addTo(map);
+    var allBounds = null;
+    var seenTypes = {};
+    var drawnCount = 0;
+
+    function buildLegend() {
+      var el = document.getElementById("legend");
+      var types = Object.keys(seenTypes).sort();
+      if (!types.length) { el.style.display = "none"; return; }
+      el.style.display = "block";
+      el.innerHTML = types.map(function (t) {
+        var label = t.replace(/_/g, " ");
+        return '<div class="row"><span class="sw" style="background:' + colorFor(t) + '"></span>' + label + "</div>";
+      }).join("");
+    }
+
+    function draw(tracks) {
+      routeLayer.clearLayers();
+      seenTypes = {};
+      allBounds = null;
+      tracks.forEach(function (t) {
+        if (!t.points || t.points.length < 2) return;
+        seenTypes[t.workout_type] = true;
+        var line = L.polyline(t.points, {
+          color: colorFor(t.workout_type), weight: 2, opacity: 0.5, lineCap: "round", lineJoin: "round"
+        });
+        routeLayer.addLayer(line);
+        allBounds = allBounds ? allBounds.extend(line.getBounds()) : L.latLngBounds(line.getBounds());
+      });
+      document.getElementById("count").textContent = tracks.length;
+      drawnCount = tracks.length;
+      buildLegend();
+    }
+
+    async function refreshRoutes() {
+      var data = await fetch("/api/routes").then(function (r) { return r.json(); });
+      if (data.count !== drawnCount) draw(data.tracks);
+    }
+
+    function setStatus(msg) { document.getElementById("status").textContent = msg; }
+
+    async function syncLoop() {
+      var bar = document.getElementById("bar");
+      bar.style.display = "block";
+      while (true) {
+        var r;
+        try {
+          r = await fetch("/api/sync", { method: "POST" }).then(function (x) { return x.json(); });
+        } catch (e) {
+          setStatus("sync error — retrying"); await new Promise(function (s) { setTimeout(s, 2000); }); continue;
+        }
+        var pct = r.total ? Math.round((r.cached / r.total) * 100) : 100;
+        bar.firstElementChild.style.width = pct + "%";
+        setStatus("loading workouts… " + r.cached + " / " + r.total);
+        await refreshRoutes();
+        if (r.pending <= 0 || r.fetched === 0) break;
+      }
+      bar.style.display = "none";
+      setStatus(drawnCount + " routes mapped");
+    }
+
+    document.getElementById("fit").onclick = function () {
+      if (allBounds && allBounds.isValid()) map.fitBounds(allBounds, { padding: [40, 40] });
+    };
+    document.getElementById("sf").onclick = function () { map.setView(SF, SF_ZOOM); };
+
+    refreshRoutes().then(syncLoop);
+  </script>
+</body>
+</html>
